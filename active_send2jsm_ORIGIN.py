@@ -1,49 +1,30 @@
 #!/usr/bin/env python3
-import re
-import sys
-import logging
 import subprocess
-"""
-Originaly the JSM script is awaiting for this data.
+import sys
+import os
+import re
+import logging
+from typing import Dict, Any
 
-/home/jsm/jec/scripts/send2jsm  -triggerName='{TRIGGER.NAME}'
-                                -triggerId='{TRIGGER.ID}'
-                                -triggerStatus='{TRIGGER.STATUS}'
-                                -triggerSeverity='{TRIGGER.SEVERITY}'
-                                -triggerDescription='{TRIGGER.DESCRIPTION}'
-                                -triggerUrl='{TRIGGER.URL}'
-                                -triggerValue='{TRIGGER.VALUE}'
-                                -triggerHostGroupName='{TRIGGER.HOSTGROUP.NAME}'
-                                -hostName='{HOST.NAME}'
-                                -ipAddress='{IPADDRESS}'
-                                -eventId='{EVENT.ID}'
-                                -date='{DATE}'
-                                -time='{TIME}'
-                                -itemKey='{ITEM.KEY}'
-                                -itemValue='{ITEM.VALUE}'
-                                -recoveryEventStatus='{EVENT.RECOVERY.STATUS}'
+def setup_logging():
+    """Configure logging"""
+    try:
+        os.makedirs('/var/log/jec', exist_ok=True)
+        logging.basicConfig(
+            filename='/var/log/jec/send2jsm.log',
+            level=logging.INFO,
+            format='[PYTHON WRAPPER] - %(asctime)s - %(levelname)s - %(message)s',
+        )
+    except Exception as e:
+        print(f"Warning: Could not set up logging: {e}", file=sys.stderr)
+        logging.basicConfig(
+            filename='/tmp/send2jsm.log',
+            level=logging.INFO,
+            format='[PYTHON WRAPPER] - %(asctime)s - %(levelname)s - %(message)s',
+        )
 
-##### Zabbix Media Type - Message configuration #####
-triggerName:{TRIGGER.NAME}
-triggerId:{TRIGGER.ID}
-triggerStatus:{TRIGGER.STATUS}
-triggerSeverity:{TRIGGER.SEVERITY}
-triggerDescription:{TRIGGER.DESCRIPTION}
-triggerUrl:{TRIGGER.URL}
-triggerValue:{TRIGGER.VALUE}
-triggerHostGroupName:{TRIGGER.HOSTGROUP.NAME}
-hostName:{HOST.NAME}
-ipAddress:{IPADDRESS}
-eventId:{EVENT.ID}
-date:{DATE}
-time:{TIME}
-itemKey:{ITEM.KEY}
-itemValue:{ITEM.VALUE}
-recoveryEventStatus:{EVENT.RECOVERY.STATUS}
-"""
-
-
-def parse_alert_message(text):
+def parse_alert_message(text: str) -> Dict[str, str]:
+    """Parse the alert message in the specified format"""
     parsed_data = {}
     key = None
     value_lines = []
@@ -63,39 +44,88 @@ def parse_alert_message(text):
 
     return parsed_data
 
-logging.basicConfig(
-    filename='/var/log/jec/send2jsm.log',
-    level=logging.INFO,
-    format='[PYTHON WRAPPER] - %(asctime)s - %(levelname)s - %(message)s',
-)
+def convert_to_send2jsm_format(data: Dict[str, str]) -> Dict[str, str]:
+    """Convert the parsed data to the format expected by send2jsm.py"""
+    # Mapping of field names from Zabbix format to send2jsm format
+    field_mapping = {
+        'triggerName': 'eventName',
+        'triggerId': 'triggerId',
+        'triggerStatus': 'status',
+        'triggerSeverity': 'severity',
+        'triggerDescription': 'description',
+        'triggerUrl': 'url',
+        'triggerValue': 'value',
+        'triggerHostGroupName': 'hostGroup',
+        'hostName': 'hostName',
+        'ipAddress': 'ipAddress',
+        'eventId': 'eventId',
+        'date': 'date',
+        'time': 'time',
+        'itemKey': 'itemKey',
+        'itemValue': 'itemValue',
+        'recoveryEventStatus': 'recoveryStatus'
+    }
+    
+    converted_data = {}
+    for zabbix_key, send2jsm_key in field_mapping.items():
+        if zabbix_key in data:
+            converted_data[send2jsm_key] = data[zabbix_key]
+    
+    return converted_data
 
-if len(sys.argv) < 2:
-    logging.error("You need to include at least one parameter")
-    sys.exit(1)
+def run_send2jsm(data: Dict[str, str], config_path: str = "integration.conf", 
+                 jec_config_path: str = "jec-config.json") -> int:
+    """Run the send2jsm.py script with the converted data"""
+    cmd = ["python3", "send2jsm.py"]
+    
+    # Add data parameters
+    for key, value in data.items():
+        cmd.extend([f"--{key}", value])
+    
+    try:
+        logging.info(f"Executing command: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            logging.info("Script executed successfully")
+            return 0
+        else:
+            logging.error(f"Script failed with return code: {result.returncode}")
+            if result.stderr:
+                logging.error(f"Error output: {result.stderr}")
+            return result.returncode
+            
+    except Exception as e:
+        logging.error(f"Error executing script: {e}")
+        return 1
 
-alert_message = sys.argv[1]
+def main():
+    setup_logging()
+    
+    if len(sys.argv) < 2:
+        logging.error("You need to include at least one parameter")
+        sys.exit(1)
 
-logging.info(f"Alert message: {alert_message}")
-parsed_data = parse_alert_message(alert_message)
+    # Get the alert message from command line arguments
+    alert_message = sys.argv[1]
+    logging.info(f"Received alert message: {alert_message}")
+    
+    try:
+        # Parse the alert message
+        parsed_data = parse_alert_message(alert_message)
+        logging.info(f"Parsed data: {parsed_data}")
+        
+        # Convert to send2jsm format
+        converted_data = convert_to_send2jsm_format(parsed_data)
+        logging.info(f"Converted data: {converted_data}")
+        
+        # Run send2jsm
+        exit_code = run_send2jsm(converted_data)
+        sys.exit(exit_code)
+        
+    except Exception as e:
+        logging.error(f"Error processing alert: {e}")
+        sys.exit(1)
 
-logging.info(f"Parsed data: {parsed_data}")
-logging.info("Trying to send data to send2jsm")
-
-command = ["/home/jsm/jec/scripts/send2jsm.py"]
-
-for key, value in parsed_data.items():
-    command.append(f"-{key}={value}")
-
-logging.info(f"This is the command: {command}")
-result = subprocess.run(command, capture_output=True, text=True)
-
-logging.info(f"Result: {result}")
-
-if result.returncode == 0:
-    logging.info(f"The script was executed correctly.")
-    # logging.info(f"Output: {result.stdout}") <- doesn't make sence, the stdout is empty
-    sys.exit(0)
-else:
-    logging.error(f"There was an error while executing the script")
-    # logging.error(f"Error Output:{result.stderr}") <- doesn't make sence, the stdout is empty
-    sys.exit(0)
+if __name__ == "__main__":
+    main() 
